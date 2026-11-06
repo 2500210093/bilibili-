@@ -1,3 +1,11 @@
+# ============================================================
+# 在原有 B站签到 workflow 上新增「飞书群机器人推送」
+# 相对仓库当前版本只有两处改动：
+#   1) Run Bilibili Task 加 id，并用 tee 把日志存到 task.log（保持原退出码）
+#   2) 末尾新增「推送飞书群机器人」步骤，成功/失败都推
+# 其余全部保持原样：关闭投币的 TASK_CONFIG、PushPlus 推送、cron、Secret 名称
+# action 版本仍为 @v3 / @v4；如需消除 Node.js 20 警告，另见「无警告版」
+# ============================================================
 name: Bilibili Daily Checkin
 
 on:
@@ -24,6 +32,7 @@ jobs:
           pip install requests loguru
 
       - name: Run Bilibili Task
+        id: bili
         env:
           # 必需的环境变量
           BILIBILI_COOKIE: ${{ secrets.BILIBILI_COOKIE }}
@@ -36,4 +45,87 @@ jobs:
           COIN_SELECT_LIKE: ${{ secrets.COIN_SELECT_LIKE }}
           COIN_VIDEO_SOURCE: ${{ secrets.COIN_VIDEO_SOURCE }}
 
-        run: python main.py
+        run: |
+          set -o pipefail
+          python main.py 2>&1 | tee task.log
+
+      - name: 推送飞书群机器人
+        if: always()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          FEISHU_KEYWORD: ${{ secrets.FEISHU_KEYWORD }}
+          BILI_OUTCOME: ${{ steps.bili.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os, re, json, time, hmac, hashlib, base64, urllib.request
+
+          webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
+          if not webhook:
+              print("未配置 FEISHU_WEBHOOK，跳过飞书推送")
+              raise SystemExit(0)
+
+          secret = os.environ.get("FEISHU_SECRET", "").strip()
+          keyword = os.environ.get("FEISHU_KEYWORD", "").strip()
+          outcome = os.environ.get("BILI_OUTCOME", "unknown")
+          trigger = os.environ.get("TRIGGER", "")
+          run_url = os.environ.get("RUN_URL", "")
+          ok = (outcome == "success")
+
+          try:
+              with open("task.log", "r", encoding="utf-8", errors="replace") as f:
+                  log = f.read()
+          except OSError:
+              log = "(未找到 task.log)"
+
+          log = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", log).replace("\r", "").strip()
+          if len(log) > 6000:
+              log = "……(内容过长，仅显示末尾)\n" + log[-6000:]
+          if not log:
+              log = "(无输出)"
+
+          trigger_cn = {"schedule": "定时", "workflow_dispatch": "手动"}.get(trigger, trigger or "未知")
+          title = "B站每日任务 · 成功" if ok else "B站每日任务 · 失败"
+          if keyword:
+              title = keyword + " · " + title
+
+          card = {
+              "schema_version": "1.0",
+              "config": {"wide_screen_mode": True},
+              "header": {
+                  "template": "green" if ok else "red",
+                  "title": {"tag": "plain_text", "content": title}
+              },
+              "elements": [
+                  {"tag": "div", "text": {"tag": "lark_md", "content":
+                      "**运行结果**：{}\n**触发方式**：{}\n**详情**：[查看 GitHub 运行日志]({})".format(
+                          "成功" if ok else "失败", trigger_cn, run_url)}},
+                  {"tag": "hr"},
+                  {"tag": "div", "text": {"tag": "lark_md", "content": "```\n{}\n```".format(log)}}
+              ]
+          }
+          payload = {"msg_type": "interactive", "card": card}
+
+          if secret:
+              ts = str(int(time.time()))
+              string_to_sign = "{}\n{}".format(ts, secret)
+              sign = base64.b64encode(
+                  hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+              ).decode("utf-8")
+              payload["timestamp"] = ts
+              payload["sign"] = sign
+
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json; charset=utf-8"}
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  body = resp.read().decode("utf-8", "replace")
+              print("飞书返回:", body)
+          except Exception as e:
+              print("飞书推送失败（不影响签到任务结果）:", type(e).__name__, str(e))
+          PY
