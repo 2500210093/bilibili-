@@ -1,10 +1,11 @@
 # ============================================================
-# 在原有 B站签到 workflow 上新增「飞书群机器人推送」
-# 相对仓库当前版本只有两处改动：
-#   1) Run Bilibili Task 加 id，并用 tee 把日志存到 task.log（保持原退出码）
-#   2) 末尾新增「推送飞书群机器人」步骤，成功/失败都推
-# 其余全部保持原样：关闭投币的 TASK_CONFIG、PushPlus 推送、cron、Secret 名称
-# action 版本仍为 @v3 / @v4；如需消除 Node.js 20 警告，另见「无警告版」
+# 二合一最终版 = 飞书群机器人推送 + 消除 Node.js 20 弃用警告
+# 相对仓库 17:57 那版的改动：
+#   1) actions/checkout@v3 -> @v7、actions/setup-python@v4 -> @v7
+#      （两者 action.yml 均为 runs.using: node24，警告随之消失）
+#   2) 推送步骤增加诊断输出：打印 webhook 是否已配置、飞书返回码判定结果
+# 其余完全不变：关闭投币的 TASK_CONFIG、PushPlus、cron、全部 Secret 名称
+# 若 @v7 出现兼容问题，把这两行改回 @v3 / @v4 即可回退
 # ============================================================
 name: Bilibili Daily Checkin
 
@@ -19,10 +20,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -63,8 +64,9 @@ jobs:
           import os, re, json, time, hmac, hashlib, base64, urllib.request
 
           webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
+          print("诊断: FEISHU_WEBHOOK =", "已配置" if webhook else "未配置")
           if not webhook:
-              print("未配置 FEISHU_WEBHOOK，跳过飞书推送")
+              print("未配置 FEISHU_WEBHOOK，跳过飞书推送（签到任务本身不受影响）")
               raise SystemExit(0)
 
           secret = os.environ.get("FEISHU_SECRET", "").strip()
@@ -73,6 +75,8 @@ jobs:
           trigger = os.environ.get("TRIGGER", "")
           run_url = os.environ.get("RUN_URL", "")
           ok = (outcome == "success")
+          print("诊断: 签到步骤结果 =", outcome, "| 签名校验 =", "启用" if secret else "未启用",
+                "| 关键词 =", keyword or "无")
 
           try:
               with open("task.log", "r", encoding="utf-8", errors="replace") as f:
@@ -126,6 +130,12 @@ jobs:
               with urllib.request.urlopen(req, timeout=10) as resp:
                   body = resp.read().decode("utf-8", "replace")
               print("飞书返回:", body)
+              try:
+                  data = json.loads(body)
+                  accepted = (data.get("code", data.get("StatusCode", -1)) == 0)
+              except ValueError:
+                  accepted = False
+              print("飞书推送结果:", "成功" if accepted else "被拒绝（检查关键词 / 签名 / IP 白名单）")
           except Exception as e:
               print("飞书推送失败（不影响签到任务结果）:", type(e).__name__, str(e))
           PY
