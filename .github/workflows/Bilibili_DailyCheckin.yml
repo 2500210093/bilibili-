@@ -11,8 +11,17 @@ name: Bilibili Daily Checkin
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # UTC时间每天3点执行(对应CST时间 11:00)
+    # GitHub 的 schedule 是「尽力而为」：整点高负载时可能延迟数小时，甚至整次丢弃。
+    # 因此避开整点，并设 3 个错峰时段互为备份；签到接口重复调用会返回「今日已签」。
+    # cron 按 UTC 计时，括号内为北京时间（UTC+8）。
+    - cron: '17 2 * * *'    # 02:17 UTC = 10:17 北京（主时段）
+    - cron: '23 5 * * *'    # 05:23 UTC = 13:23 北京（备份）
+    - cron: '37 9 * * *'    # 09:37 UTC = 17:37 北京（备份）
   workflow_dispatch:  # 支持手动触发
+
+concurrency:
+  group: bili-daily-checkin
+  cancel-in-progress: false
 
 jobs:
   run-bilibili-task:
